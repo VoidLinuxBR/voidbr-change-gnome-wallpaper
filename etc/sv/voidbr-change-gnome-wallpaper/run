@@ -1,0 +1,24 @@
+#!/bin/sh
+
+# Intervalo em segundos (ex: 300 segundos = 5 minutos)
+INTERVAL=600
+
+# Comando a ser executado
+COMMAND="/usr/local/bin/chili-change-gnome-wallpaper"
+
+exec 2>&1
+
+echo "Timer service iniciado. Intervalo: ${INTERVAL}s"
+
+while :; do
+	# Executa o comando
+	if [ -x "$COMMAND" ] || command -v $(echo "$COMMAND" | awk '{print $1}') >/dev/null 2>&1; then
+		echo "$(date): Executando comando..."
+		$COMMAND
+	else
+		echo "Erro: Comando não encontrado ou não executável"
+	fi
+
+	# Aguarda o intervalo
+	sleep $INTERVAL
+done
