@@ -38,9 +38,8 @@ export TEXTDOMAIN=voidbr-change-gnome-wallpaper-timer
 CONFIG=/etc/voidbr-change-gnome-wallpaper.conf
 INTERVAL=300 # padrão (5 min)
 
-[ -f "$CONFIG" ] && . "$CONFIG"
-
 while :; do
+    [ -f "$CONFIG" ] && . "$CONFIG"
 	/usr/local/bin/chili-change-gnome-wallpaper
 	sleep "$INTERVAL"
 done
