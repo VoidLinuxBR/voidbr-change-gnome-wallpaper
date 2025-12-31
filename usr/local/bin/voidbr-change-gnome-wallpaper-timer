@@ -39,7 +39,16 @@ CONFIG=/etc/voidbr-change-gnome-wallpaper.conf
 INTERVAL=300 # padrão (5 min)
 
 while :; do
-    [ -f "$CONFIG" ] && . "$CONFIG"
+	if [ -f "$CONFIG" ]; then
+		. "$CONFIG"
+	fi
+
+	case "$INTERVAL" in
+	'' | *[!0-9]*)
+		INTERVAL=300 # padrão (5 min)
+		;;
+	esac
+
 	/usr/local/bin/chili-change-gnome-wallpaper
 	sleep "$INTERVAL"
 done
