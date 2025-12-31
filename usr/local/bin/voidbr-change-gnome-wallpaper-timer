@@ -35,20 +35,54 @@
 export TEXTDOMAINDIR=/usr/share/locale
 export TEXTDOMAIN=voidbr-change-gnome-wallpaper-timer
 
+# valores padrão (fallback)
 CONFIG=/etc/voidbr-change-gnome-wallpaper.conf
-INTERVAL=300 # padrão (5 min)
+BINARY=/usr/local/bin/voidbr-change-gnome-wallpaper
+INTERVAL=300 # 5 min
+DISABLED=no  # ligado
 
-while :; do
-	if [ -f "$CONFIG" ]; then
-		. "$CONFIG"
+load_config() {
+	# Se o config foi apagado: encerra tudo
+	if [ ! -f "$CONFIG" ]; then
+		echo "Config $CONFIG removido. Encerrando slideshow." >&2
+		exit 0
 	fi
 
+	. "$CONFIG"
+
+	# valida INTERVAL (somente números)
 	case "$INTERVAL" in
 	'' | *[!0-9]*)
-		INTERVAL=300 # padrão (5 min)
+		INTERVAL=300
 		;;
 	esac
 
-    /usr/local/bin/voidbr-change-gnome-wallpaper
+	# normaliza DISABLED
+	case "$(printf '%s' "$DISABLED" | tr '[:upper:]' '[:lower:]')" in
+	yes | true | 1)
+		DISABLED=yes
+		;;
+	*)
+		DISABLED=no
+		;;
+	esac
+}
+
+# se o binário não existir, não faz sentido rodar
+if [ ! -x "$BINARY" ]; then
+	echo "$BINARY: comando não encontrado ou não executável. Encerrando." >&2
+	exit 0
+fi
+
+while :; do
+	load_config
+
+	# proteção final contra INTERVAL=0
+	[ "$INTERVAL" -gt 0 ] || INTERVAL=300
+
+	if [ "$DISABLED" != "yes" ]; then
+		"$BINARY"
+	fi
+
 	sleep "$INTERVAL"
 done
