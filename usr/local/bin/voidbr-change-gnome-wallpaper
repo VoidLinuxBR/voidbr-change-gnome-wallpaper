@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 # shellcheck shell=bash disable=SC1091,SC2039,SC2166
 #
-#  chili-change-gnome-wallpaper
-#  chili-change-gnome-wallpaper (slideshow)
+#  voidbr-change-gnome-wallpaper-timer (slideshow)
 #  Aplica wallpapers do diretório em sequência
 #
 #  Created: 2025/09/13 - 12:34
@@ -34,7 +33,7 @@
 ##############################################################################
 #export LANGUAGE=pt_BR
 export TEXTDOMAINDIR=/usr/share/locale
-export TEXTDOMAIN=chili-change-gnome-wallpaper
+export TEXTDOMAIN=voidbr-change-gnome-wallpaper-timer
 
 # Definir a variável de controle para restaurar a formatação original
 reset=$(tput sgr0)

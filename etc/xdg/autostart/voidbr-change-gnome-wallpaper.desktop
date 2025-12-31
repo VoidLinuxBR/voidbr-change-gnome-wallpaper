@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=VoidBR Wallpaper Slideshow
+Exec=/usr/local/bin/voidbr-change-gnome-wallpaper-timer
+X-GNOME-Autostart-enabled=true
