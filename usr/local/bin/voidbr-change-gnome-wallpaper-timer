@@ -49,6 +49,6 @@ while :; do
 		;;
 	esac
 
-	/usr/local/bin/chili-change-gnome-wallpaper
+    /usr/local/bin/voidbr-change-gnome-wallpaper
 	sleep "$INTERVAL"
 done
