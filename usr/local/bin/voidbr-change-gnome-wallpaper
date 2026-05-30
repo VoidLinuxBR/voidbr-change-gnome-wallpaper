@@ -85,7 +85,8 @@ MostraErro() {
 trap 'MostraErro "$APP[$FUNCNAME][$LINENO]" "$BASH_COMMAND" "$?"; exit 1' ERR
 
 WALLPAPER_DIR="/usr/share/backgrounds/chililinux"
-STATE_FILE="/tmp/chili-wallpaper-state"
+STATE_FILE="$HOME/.cache/${APP}/gnome-wallpaper-state"
+mkdir -p "$(dirname "$STATE_FILE")"
 
 # Lista todos os arquivos no diretório
 FILES=("$WALLPAPER_DIR"/*)
