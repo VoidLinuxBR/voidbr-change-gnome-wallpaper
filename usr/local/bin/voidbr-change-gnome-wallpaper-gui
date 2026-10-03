@@ -1,0 +1,863 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+#   voidbr-change-gnome-wallpaper-gui
+#   Created: sex 02 out 2026 13:40:00 -04
+#   Altered: sex 02 out 2026 14:10:00 -04
+#   Updated: sex 02 out 2026 14:10:00 -04
+#
+#   Copyright (c) 2026, Vilmar Catafesta <vcatafesta@gmail.com>
+#   Copyright (c) 2026, ChiliLinux Development Team <https://chililinux.com> <https://github.com/chililinux>
+#   Assembled By Vilmar Catafesta for the VoidBR project.
+#   All rights reserved.
+#
+#   ChangeLog:
+#   - v0.1.0 (2026-10-02): Versão inicial — GTK4 + PyGObject, no mesmo visual do
+#     voidbr-iso-writer e do voidbr-snapper-manager-gui (tema escuro, botões
+#     coloridos, emojis). Configura o /etc/voidbr-change-gnome-wallpaper.conf:
+#     modo slideshow (intervalo), wallpaper fixo (FIXED_WALLPAPER) ou desativado.
+#     Mostra o wallpaper atual, as miniaturas da pasta e o estado do timer.
+#
+#   Permission is hereby granted, free of charge, to any person obtaining a copy
+#   of this software and associated documentation files (the "Software"), to deal
+#   in the Software without restriction, including without limitation the rights
+#   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+#   copies of the Software, and to permit persons to whom the Software is
+#   furnished to do so, subject to the following conditions:
+#
+#   The above copyright notice and this permission notice shall be included in
+#   all copies or substantial portions of the Software.
+#
+#   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+#   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+#   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+#   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+#   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+#   THE SOFTWARE.
+##############################################################################
+"""
+voidbr-change-gnome-wallpaper-gui - Interface gráfica do voidbr-change-gnome-wallpaper.
+
+Edita o /etc/voidbr-change-gnome-wallpaper.conf, que o
+voidbr-change-gnome-wallpaper-timer relê a cada ciclo:
+  - leitura do .conf, do gsettings e das miniaturas roda como o usuário;
+  - gravação do .conf roda via pkexec.
+
+Requer: PyGObject (GTK4), polkit e o voidbr-change-gnome-wallpaper.
+    sudo xbps-install -S python3-gobject gtk4 polkit
+"""
+
+import os
+import re
+import shlex
+import subprocess
+import tempfile
+from urllib.parse import unquote, urlparse
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
+
+APP_ID = "br.voidbr.changegnomewallpaper"
+APP_NAME = "voidbr-change-gnome-wallpaper"
+APP_VERSION = "0.1.0"
+
+CONFIG = "/etc/voidbr-change-gnome-wallpaper.conf"
+CLI = "/usr/local/bin/voidbr-change-gnome-wallpaper"
+TIMER = "voidbr-change-gnome-wallpaper-timer"
+PASTA_PADRAO = "/usr/share/backgrounds/chililinux"
+ESQUEMA_FUNDO = "org.gnome.desktop.background"
+
+# mesmos valores do .conf distribuído no pacote
+INTERVALO_PADRAO = 60
+INTERVALO_FALLBACK = 300  # o timer usa 300 quando o INTERVAL é inválido
+
+EXTENSOES = (".jpg", ".jpeg", ".png", ".webp", ".svg", ".bmp", ".jxl", ".avif")
+MINI_L, MINI_A = 132, 74
+
+# (rótulo, código)
+MODOS = [("🎞️ Slideshow", "slide"), ("📌 Wallpaper fixo", "fixo"), ("⏸️ Desativado", "off")]
+UNIDADES = [("segundos", 1), ("minutos", 60), ("horas", 3600)]
+
+CHAVES = ("INTERVAL", "DISABLED", "FIXED_WALLPAPER")
+COMENTARIO = {
+    "INTERVAL": "# Intervalo em segundos",
+    "DISABLED": "# Controle do slideshow\n# yes | no | true | false | 0 | 1",
+    "FIXED_WALLPAPER": "# Wallpaper fixo (caminho completo da imagem)\n"
+                       "# vazio = slideshow com os wallpapers da pasta",
+}
+
+CSS = """
+window {
+    background-color: #1e1f29;
+}
+
+label {
+    color: #f1f1f1;
+}
+
+.titulo-app {
+    font-size: 20px;
+    font-weight: 800;
+    color: #7dd3fc;
+}
+
+.subtitulo {
+    font-weight: bold;
+    color: #cbd5e1;
+}
+
+.texto-apagado {
+    color: #94a3b8;
+}
+
+.botao-azul {
+    background: linear-gradient(180deg, #3b82f6, #2563eb);
+    color: white;
+    font-weight: bold;
+    border-radius: 10px;
+    padding: 8px 14px;
+}
+.botao-azul:hover { background: #3b82f6; }
+
+.botao-verde {
+    background: linear-gradient(180deg, #34d399, #059669);
+    color: white;
+    font-weight: bold;
+    border-radius: 10px;
+    padding: 8px 14px;
+}
+.botao-verde:hover { background: #34d399; }
+
+.botao-vermelho {
+    background: linear-gradient(180deg, #f87171, #dc2626);
+    color: white;
+    font-weight: bold;
+    border-radius: 10px;
+    padding: 8px 14px;
+}
+.botao-vermelho:hover { background: #f87171; }
+
+.botao-cinza {
+    background: linear-gradient(180deg, #9ca3af, #6b7280);
+    color: white;
+    font-weight: bold;
+    border-radius: 10px;
+    padding: 8px 14px;
+}
+.botao-cinza:hover { background: #9ca3af; }
+
+.botao-laranja {
+    background: linear-gradient(180deg, #fbbf24, #d97706);
+    color: white;
+    font-weight: bold;
+    border-radius: 10px;
+    padding: 8px 14px;
+}
+.botao-laranja:hover { background: #fbbf24; }
+
+button:disabled {
+    opacity: 0.45;
+}
+
+.caixa-status {
+    background-color: #2a2b3a;
+    border-radius: 10px;
+    padding: 8px;
+}
+
+.caixa-alerta {
+    background-color: #3b2f1a;
+    border: 1px solid #d97706;
+    border-radius: 10px;
+    padding: 8px;
+}
+
+.cabecalho-app {
+    background: #1a1b26;
+    color: #f1f1f1;
+    box-shadow: none;
+}
+
+.botao-menu {
+    border-radius: 8px;
+}
+
+.caixa-previa {
+    background-color: #2a2b3a;
+    border-radius: 10px;
+}
+
+.lista-wallpapers,
+.lista-wallpapers > viewport,
+.lista-wallpapers flowbox {
+    background-color: #2a2b3a;
+    border-radius: 10px;
+}
+.miniatura {
+    border-radius: 8px;
+    border: 3px solid transparent;
+}
+flowboxchild {
+    padding: 2px;
+    border-radius: 10px;
+}
+flowboxchild:hover {
+    background-color: #33354a;
+}
+flowboxchild:selected {
+    background-color: transparent;
+}
+flowboxchild:selected .miniatura {
+    border-color: #3b82f6;
+}
+
+dropdown > button,
+spinbutton,
+spinbutton > text,
+spinbutton > button {
+    background: #2a2b3a;
+    color: #f1f1f1;
+}
+
+popover > contents {
+    background-color: #2a2b3a;
+    color: #f1f1f1;
+}
+"""
+
+
+# ---------------------------------------------------------------------------
+# .conf
+# ---------------------------------------------------------------------------
+
+def normalizar_disabled(valor):
+    """Mesma regra do voidbr-change-gnome-wallpaper-timer."""
+    return "yes" if valor.strip().lower() in ("yes", "true", "1") else "no"
+
+
+def tirar_aspas(bruto):
+    """Valor como o bash enxergaria depois do '.' (aspas simples/duplas)."""
+    try:
+        partes = shlex.split(bruto, comments=True)
+        return partes[0] if partes else ""
+    except ValueError:
+        return bruto.strip().strip("\"'")
+
+
+def por_aspas(valor):
+    """Valor seguro para o timer fazer '. arquivo.conf'."""
+    if valor == "":
+        return ""
+    if re.fullmatch(r"[A-Za-z0-9_./+:@%,-]+", valor):
+        return valor
+    return "'" + valor.replace("'", "'\\''") + "'"
+
+
+def ler_config():
+    """Lê o .conf sem executá-lo (o timer usa '.', aqui só interpretamos)."""
+    cfg = {"INTERVAL": INTERVALO_PADRAO, "DISABLED": "no", "FIXED_WALLPAPER": ""}
+    linhas = []
+    existe = os.path.isfile(CONFIG)
+    if existe:
+        with open(CONFIG, encoding="utf-8", errors="replace") as f:
+            linhas = f.read().splitlines()
+        for linha in linhas:
+            m = re.match(r"^\s*(INTERVAL|DISABLED|FIXED_WALLPAPER)\s*=(.*)$", linha)
+            if not m:
+                continue
+            chave, valor = m.group(1), tirar_aspas(m.group(2))
+            if chave == "INTERVAL":
+                cfg[chave] = int(valor) if valor.isdigit() and int(valor) > 0 else INTERVALO_FALLBACK
+            elif chave == "DISABLED":
+                cfg[chave] = normalizar_disabled(valor)
+            else:
+                cfg[chave] = valor
+    return existe, cfg, linhas
+
+
+def montar_config(linhas, cfg):
+    """Troca só os valores das chaves, preservando comentários e linhas extras."""
+    vistas, saida = set(), []
+    for linha in linhas:
+        m = re.match(r"^(\s*)(INTERVAL|DISABLED|FIXED_WALLPAPER)(\s*=).*$", linha)
+        if m:
+            chave = m.group(2)
+            saida.append(f"{m.group(1)}{chave}{m.group(3)}{por_aspas(str(cfg[chave]))}")
+            vistas.add(chave)
+        else:
+            saida.append(linha)
+    for chave in CHAVES:
+        if chave not in vistas:
+            if saida and saida[-1].strip():
+                saida.append("")
+            saida.append(COMENTARIO[chave])
+            saida.append(f"{chave}={por_aspas(str(cfg[chave]))}")
+    return "\n".join(saida) + "\n"
+
+
+def gravar_config(conteudo):
+    """Grava num temporário e instala em /etc via pkexec. Devolve (código, erro)."""
+    fd, tmp = tempfile.mkstemp(prefix="voidbr-cgw-", suffix=".conf")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(conteudo)
+        os.chmod(tmp, 0o644)
+        comando = ["install", "-m", "644", "-o", "root", "-g", "root", tmp, CONFIG]
+        if os.geteuid() != 0:
+            comando = ["pkexec"] + comando
+        try:
+            p = subprocess.run(comando, capture_output=True, text=True)
+        except FileNotFoundError as e:
+            return 127, str(e)
+        return p.returncode, (p.stderr or p.stdout).strip()
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# sistema
+# ---------------------------------------------------------------------------
+
+def pasta_wallpapers():
+    """Lê o WALLPAPER_DIR direto do script (hoje é fixo lá dentro)."""
+    try:
+        with open(CLI, encoding="utf-8", errors="replace") as f:
+            for linha in f:
+                m = re.match(r'^\s*WALLPAPER_DIR=["\']?([^"\'\s]+)', linha)
+                if m:
+                    return m.group(1)
+    except OSError:
+        pass
+    return PASTA_PADRAO
+
+
+def listar_wallpapers(pasta):
+    try:
+        return sorted(e.path for e in os.scandir(pasta)
+                      if e.is_file() and e.name.lower().endswith(EXTENSOES))
+    except OSError:
+        return []
+
+
+def timer_rodando():
+    p = subprocess.run(["pgrep", "-u", str(os.getuid()), "-f", TIMER], capture_output=True)
+    return p.returncode == 0
+
+
+def intervalo_legivel(segundos):
+    if segundos % 3600 == 0:
+        n, u = segundos // 3600, "hora"
+    elif segundos % 60 == 0:
+        n, u = segundos // 60, "minuto"
+    else:
+        n, u = segundos, "segundo"
+    return f"{n} {u}{'s' if n != 1 else ''}"
+
+
+def melhor_unidade(segundos):
+    for idx in (2, 1):
+        if segundos % UNIDADES[idx][1] == 0:
+            return idx, segundos // UNIDADES[idx][1]
+    return 0, segundos
+
+
+def textura_miniatura(caminho):
+    try:
+        pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(caminho, MINI_L, MINI_A * 2, True)
+        return Gdk.Texture.new_for_pixbuf(pb)
+    except GLib.Error:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# janela principal
+# ---------------------------------------------------------------------------
+
+class JanelaWallpaper(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title=APP_NAME)
+        self.set_default_size(640, -1)
+
+        self.linhas_conf = []
+        self.salvo = None
+        self.fundo = None
+        self.pasta = pasta_wallpapers()
+        self.wallpapers = []
+        self.caminho_fixo = ""
+        self.miniaturas = {}  # caminho -> FlowBoxChild
+        self.carregando = False
+
+        # --- CSS ---
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS.encode("utf-8"))
+        Gtk.StyleContext.add_provider_for_display(
+            self.get_display(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        # --- Barra de título com menu ---
+        cabecalho = Gtk.HeaderBar()
+        cabecalho.add_css_class("cabecalho-app")
+        self.set_titlebar(cabecalho)
+
+        menu = Gio.Menu()
+        menu.append("🔄 Recarregar configuração", "win.recarregar")
+        menu.append("ℹ️ Sobre / Créditos", "win.sobre")
+        botao_menu = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu)
+        botao_menu.add_css_class("botao-menu")
+        cabecalho.pack_end(botao_menu)
+
+        for nome, cb in (("recarregar", lambda *_: self.carregar()),
+                         ("sobre", self.ao_clicar_sobre)):
+            acao = Gio.SimpleAction.new(nome, None)
+            acao.connect("activate", cb)
+            self.add_action(acao)
+
+        caixa = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                        margin_top=18, margin_bottom=18, margin_start=18, margin_end=18)
+        self.set_child(caixa)
+
+        # --- Título ---
+        titulo = Gtk.Label(label="🖼️ voidbr-change-gnome-wallpaper", xalign=0)
+        titulo.add_css_class("titulo-app")
+        caixa.append(titulo)
+
+        # --- Aviso ---
+        self.caixa_alerta = Gtk.Box(spacing=10)
+        self.caixa_alerta.add_css_class("caixa-alerta")
+        self.label_alerta = Gtk.Label(xalign=0, hexpand=True, wrap=True)
+        self.caixa_alerta.append(self.label_alerta)
+        self.caixa_alerta.set_visible(False)
+        caixa.append(self.caixa_alerta)
+
+        # --- Wallpaper atual ---
+        self.label_atual = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        self.label_atual.add_css_class("subtitulo")
+        caixa.append(self.label_atual)
+
+        # ScrolledWindow sem barras só para travar a altura: o Gtk.Picture
+        # sozinho cresce conforme a proporção da imagem
+        previa = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                    vscrollbar_policy=Gtk.PolicyType.NEVER)
+        previa.set_size_request(-1, 170)
+        previa.add_css_class("caixa-previa")
+        self.imagem = Gtk.Picture(can_shrink=True)
+        if hasattr(self.imagem, "set_content_fit"):
+            self.imagem.set_content_fit(Gtk.ContentFit.COVER)
+        previa.set_child(self.imagem)
+        caixa.append(previa)
+
+        # --- Configuração ---
+        grade = Gtk.Grid(column_spacing=12, row_spacing=10)
+        caixa.append(grade)
+
+        grade.attach(Gtk.Label(label="🎛️ Modo:", xalign=0), 0, 0, 1, 1)
+        self.lista_modo = Gtk.DropDown.new_from_strings([r for r, _ in MODOS])
+        self.lista_modo.set_hexpand(True)
+        self.lista_modo.connect("notify::selected", self.ao_mudar_modo)
+        grade.attach(self.lista_modo, 1, 0, 1, 1)
+
+        # linha que muda conforme o modo (mesma altura nos três)
+        self.pilha = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
+        grade.attach(self.pilha, 0, 1, 2, 1)
+
+        linha_slide = Gtk.Box(spacing=8)
+        linha_slide.append(Gtk.Label(label="⏱️ Trocar a cada:", xalign=0, hexpand=True))
+        self.spin = Gtk.SpinButton.new_with_range(1, 99999, 1)
+        self.spin.connect("value-changed", self.ao_mudar)
+        self.lista_unidade = Gtk.DropDown.new_from_strings([u for u, _ in UNIDADES])
+        self.lista_unidade.connect("notify::selected", self.ao_mudar)
+        linha_slide.append(self.spin)
+        linha_slide.append(self.lista_unidade)
+        self.pilha.add_named(linha_slide, "slide")
+
+        linha_fixo = Gtk.Box(spacing=8)
+        linha_fixo.append(Gtk.Label(label="📌 Wallpaper:", xalign=0))
+        self.label_fixo = Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.START)
+        self.label_fixo.add_css_class("texto-apagado")
+        linha_fixo.append(self.label_fixo)
+        linha_fixo.append(self._botao("📂 Outro arquivo…", "botao-azul", self.ao_clicar_escolher))
+        self.pilha.add_named(linha_fixo, "fixo")
+
+        linha_off = Gtk.Box()
+        aviso_off = Gtk.Label(xalign=0, hexpand=True, wrap=True, label=(
+            "⏸️ O timer continua rodando, mas não troca o wallpaper."))
+        aviso_off.add_css_class("texto-apagado")
+        linha_off.append(aviso_off)
+        self.pilha.add_named(linha_off, "off")
+
+        # --- Miniaturas ---
+        linha_titulo = Gtk.Box(spacing=8)
+        self.label_grade = Gtk.Label(xalign=0, hexpand=True)
+        self.label_grade.add_css_class("subtitulo")
+        self.label_pasta = Gtk.Label(xalign=1, selectable=True, ellipsize=Pango.EllipsizeMode.START)
+        self.label_pasta.add_css_class("texto-apagado")
+        linha_titulo.append(self.label_grade)
+        linha_titulo.append(self.label_pasta)
+        caixa.append(linha_titulo)
+
+        rolagem = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        rolagem.set_size_request(-1, 180)
+        rolagem.add_css_class("lista-wallpapers")
+        self.grade_mini = Gtk.FlowBox(
+            selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+            max_children_per_line=8, min_children_per_line=2,
+            row_spacing=4, column_spacing=4, valign=Gtk.Align.START,
+            margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
+        self.grade_mini.connect("selected-children-changed", self.ao_selecionar_miniatura)
+        rolagem.set_child(self.grade_mini)
+        self.rolagem_mini = rolagem
+        caixa.append(rolagem)
+
+        # --- Status ---
+        caixa_status = Gtk.Box()
+        caixa_status.add_css_class("caixa-status")
+        self.label_status = Gtk.Label(label="⏳ Carregando…", xalign=0, hexpand=True, wrap=True)
+        caixa_status.append(self.label_status)
+        caixa.append(caixa_status)
+
+        # --- Ações ---
+        linha_acoes = Gtk.Box(spacing=8, homogeneous=True)
+        self.botao_proximo = self._botao("⏭️ Próximo", "botao-laranja", self.ao_clicar_proximo)
+        self.botao_padrao = self._botao("♻️ Padrão", "botao-azul", self.ao_clicar_padrao)
+        self.botao_salvar = self._botao("💾 Salvar", "botao-verde", self.ao_clicar_salvar)
+        for b in (self.botao_proximo, self.botao_padrao, self.botao_salvar):
+            linha_acoes.append(b)
+        caixa.append(linha_acoes)
+
+        # --- Fechar ---
+        caixa.append(self._botao("🚪 Fechar", "botao-cinza", lambda *_: self.close()))
+
+        self.configurar_gsettings()
+        self.preencher_miniaturas()
+        self.carregar()
+
+    # -- helpers de construção ---------------------------------------------
+
+    def _botao(self, texto, classe, cb):
+        b = Gtk.Button(label=texto)
+        b.add_css_class(classe)
+        b.connect("clicked", cb)
+        return b
+
+    # -- dados -------------------------------------------------------------
+
+    def configurar_gsettings(self):
+        fonte = Gio.SettingsSchemaSource.get_default()
+        if fonte and fonte.lookup(ESQUEMA_FUNDO, True):
+            self.fundo = Gio.Settings.new(ESQUEMA_FUNDO)
+            for chave in ("picture-uri", "picture-uri-dark"):
+                self.fundo.connect(f"changed::{chave}", lambda *_: self.atualizar_previa())
+
+    def wallpaper_atual(self):
+        if not self.fundo:
+            return None
+        uri = self.fundo.get_string("picture-uri-dark") or self.fundo.get_string("picture-uri")
+        if not uri:
+            return None
+        return unquote(urlparse(uri).path) if uri.startswith("file://") else uri
+
+    def atualizar_previa(self):
+        caminho = self.wallpaper_atual()
+        if caminho and os.path.isfile(caminho):
+            self.imagem.set_filename(caminho)
+            self.label_atual.set_text(f"🖥️ Wallpaper atual: {os.path.basename(caminho)}")
+        else:
+            self.imagem.set_paintable(None)
+            self.label_atual.set_text("🖥️ Wallpaper atual: (não foi possível ler do GNOME)")
+
+    def preencher_miniaturas(self):
+        """Cria a grade de miniaturas e carrega as imagens aos poucos."""
+        self.wallpapers = listar_wallpapers(self.pasta)
+        pendentes = []
+        for caminho in self.wallpapers:
+            img = Gtk.Picture(can_shrink=True)
+            img.set_size_request(MINI_L, MINI_A)
+            if hasattr(img, "set_content_fit"):
+                img.set_content_fit(Gtk.ContentFit.COVER)
+            img.add_css_class("miniatura")
+            img.set_tooltip_text(os.path.basename(caminho))
+            filho = Gtk.FlowBoxChild(child=img)
+            filho.caminho = caminho
+            self.grade_mini.append(filho)
+            self.miniaturas[caminho] = filho
+            pendentes.append((img, caminho))
+
+        def proxima():
+            if not pendentes:
+                return False
+            img, caminho = pendentes.pop(0)
+            tex = textura_miniatura(caminho)
+            if tex:
+                img.set_paintable(tex)
+            return True
+
+        GLib.idle_add(proxima)
+
+    def carregar(self):
+        existe, cfg, linhas = ler_config()
+        self.linhas_conf = linhas
+        self.salvo = dict(cfg)
+
+        self.carregando = True
+        idx, valor = melhor_unidade(cfg["INTERVAL"])
+        self.lista_unidade.set_selected(idx)
+        self.spin.set_value(valor)
+        self.definir_fixo(cfg["FIXED_WALLPAPER"])
+        if cfg["DISABLED"] == "yes":
+            modo = "off"
+        elif cfg["FIXED_WALLPAPER"]:
+            modo = "fixo"
+        else:
+            modo = "slide"
+        self.lista_modo.set_selected([c for _, c in MODOS].index(modo))
+        self.carregando = False
+
+        self.label_pasta.set_text(self.pasta)
+        self.label_pasta.set_tooltip_text(self.pasta)
+
+        avisos = []
+        if not existe:
+            avisos.append(f"⚠️ <b>{GLib.markup_escape_text(CONFIG)} não existe.</b>\n"
+                          "Sem ele o timer encerra o slideshow. Ele será criado ao salvar.")
+        if cfg["FIXED_WALLPAPER"] and not os.path.isfile(cfg["FIXED_WALLPAPER"]):
+            avisos.append("⚠️ <b>O wallpaper fixo configurado não existe mais.</b>\n"
+                          "Enquanto isso, o timer está usando o slideshow.")
+        if not self.wallpapers:
+            avisos.append(f"⚠️ Nenhuma imagem em {GLib.markup_escape_text(self.pasta)}.")
+        self.label_alerta.set_markup("\n".join(avisos))
+        self.caixa_alerta.set_visible(bool(avisos))
+
+        self.atualizar_previa()
+        self.ao_mudar_modo()
+
+    def definir_fixo(self, caminho):
+        self.caminho_fixo = caminho
+        self.label_fixo.set_text(caminho or "nenhum escolhido")
+        self.label_fixo.set_tooltip_text(caminho or None)
+        self.sincronizar_selecao()
+
+    def sincronizar_selecao(self):
+        """Só marca miniatura no modo fixo; nos outros a grade é só visual."""
+        filho = self.miniaturas.get(self.caminho_fixo)
+        if self.modo() == "fixo" and filho:
+            self.grade_mini.select_child(filho)
+        else:
+            self.grade_mini.unselect_all()
+
+    def modo(self):
+        return MODOS[self.lista_modo.get_selected()][1]
+
+    def valores_atuais(self):
+        modo = self.modo()
+        if modo == "off":
+            # desativado: mantém o wallpaper fixo que já estava salvo
+            fixo = self.salvo["FIXED_WALLPAPER"] if self.salvo else ""
+        else:
+            fixo = self.caminho_fixo if modo == "fixo" else ""
+        return {
+            "INTERVAL": self.spin.get_value_as_int() * UNIDADES[self.lista_unidade.get_selected()][1],
+            "DISABLED": "yes" if modo == "off" else "no",
+            "FIXED_WALLPAPER": fixo,
+        }
+
+    # -- interface ---------------------------------------------------------
+
+    def ao_mudar_modo(self, *_):
+        modo = self.modo()
+        self.pilha.set_visible_child_name(modo)
+        n = len(self.wallpapers)
+        if modo == "fixo":
+            self.grade_mini.set_selection_mode(Gtk.SelectionMode.SINGLE)
+            self.label_grade.set_text("🗂️ Escolha o wallpaper fixo:")
+        else:
+            self.grade_mini.set_selection_mode(Gtk.SelectionMode.NONE)
+            self.label_grade.set_text(f"🗂️ {n} wallpaper{'s' if n != 1 else ''} na pasta:")
+        self.rolagem_mini.set_sensitive(modo != "off")
+        self.sincronizar_selecao()
+        self.ao_mudar()
+
+    def ao_mudar(self, *_):
+        if self.carregando:
+            return
+        modo = self.modo()
+        vals = self.valores_atuais()
+        valido = not (modo == "fixo" and not self.caminho_fixo)
+        mudou = vals != self.salvo or not os.path.isfile(CONFIG)
+        self.botao_salvar.set_sensitive(valido and mudou)
+        self.botao_proximo.set_sensitive(
+            modo == "slide" and self.fundo is not None
+            and os.access(CLI, os.X_OK) and bool(self.wallpapers))
+        self.atualizar_status(mudou)
+
+    def atualizar_status(self, mudou=False):
+        esc = GLib.markup_escape_text
+        rodando = timer_rodando()
+        partes = [
+            "<span foreground='#34d399' weight='bold'>✅ timer rodando</span>" if rodando
+            else "<span foreground='#f87171' weight='bold'>❌ timer parado</span>",
+        ]
+        s = self.salvo or {}
+        if s.get("DISABLED") == "yes":
+            partes.append("⏸️ desativado")
+        elif s.get("FIXED_WALLPAPER"):
+            partes.append(esc(f"📌 fixo: {os.path.basename(s['FIXED_WALLPAPER'])}"))
+        else:
+            partes.append(esc(f"🎞️ slideshow a cada {intervalo_legivel(s.get('INTERVAL', 0))}"))
+        partes.append(esc(f"📁 {len(self.wallpapers)} wallpapers"))
+        if mudou:
+            partes.append("<span foreground='#fbbf24' weight='bold'>✏️ alterações não salvas</span>")
+        self.label_status.set_markup("   •   ".join(partes))
+        if not rodando:
+            self.label_status.set_tooltip_text(
+                "O timer é iniciado no login do GNOME (autostart). "
+                "Saia e entre de novo na sessão para iniciá-lo.")
+        else:
+            self.label_status.set_tooltip_text(None)
+
+    # -- diálogos ----------------------------------------------------------
+
+    def erro(self, titulo, detalhe=""):
+        d = Gtk.AlertDialog(message=f"❌ {titulo}", detail=detalhe, modal=True)
+        d.show(self)
+
+    # -- ações -------------------------------------------------------------
+
+    def ao_selecionar_miniatura(self, grade):
+        if self.carregando or self.modo() != "fixo":
+            return
+        sel = grade.get_selected_children()
+        if sel and sel[0].caminho != self.caminho_fixo:
+            self.definir_fixo(sel[0].caminho)
+            self.ao_mudar()
+
+    def ao_clicar_escolher(self, *_):
+        filtro = Gtk.FileFilter()
+        filtro.set_name("Imagens")
+        filtro.add_pixbuf_formats()
+        inicio = os.path.dirname(self.caminho_fixo) if self.caminho_fixo else self.pasta
+        pasta_inicial = Gio.File.new_for_path(inicio) if os.path.isdir(inicio) else None
+
+        if hasattr(Gtk, "FileDialog"):
+            # API nova (GTK 4.10+), sem warnings de depreciação
+            dialogo = Gtk.FileDialog(title="Selecione o wallpaper", modal=True)
+            filtros = Gio.ListStore.new(Gtk.FileFilter)
+            filtros.append(filtro)
+            dialogo.set_filters(filtros)
+            if pasta_inicial:
+                dialogo.set_initial_folder(pasta_inicial)
+
+            def resposta(dlg, res):
+                try:
+                    arquivo = dlg.open_finish(res)
+                except GLib.Error:
+                    return
+                if arquivo and arquivo.get_path():
+                    self.ao_escolher_arquivo(arquivo.get_path())
+            dialogo.open(self, None, resposta)
+        else:
+            # Fallback para GTK4 mais antigo (< 4.10)
+            dialogo = Gtk.FileChooserNative(title="Selecione o wallpaper", transient_for=self,
+                                            action=Gtk.FileChooserAction.OPEN)
+            dialogo.add_filter(filtro)
+            if pasta_inicial:
+                dialogo.set_current_folder(pasta_inicial)
+
+            def resposta(dlg, r):
+                if r == Gtk.ResponseType.ACCEPT and dlg.get_file():
+                    self.ao_escolher_arquivo(dlg.get_file().get_path())
+                dlg.destroy()
+            dialogo.connect("response", resposta)
+            dialogo.show()
+            self._dialogo = dialogo  # mantém a referência viva
+
+    def ao_escolher_arquivo(self, caminho):
+        self.definir_fixo(caminho)
+        self.ao_mudar()
+        # o .conf é global, mas a imagem pode estar no $HOME de um usuário só
+        if caminho.startswith(os.path.expanduser("~") + os.sep):
+            self.label_alerta.set_markup(
+                "⚠️ A imagem está na sua pasta pessoal: outros usuários do sistema "
+                "não vão conseguir usá-la.")
+            self.caixa_alerta.set_visible(True)
+
+    def ao_clicar_padrao(self, *_):
+        idx, valor = melhor_unidade(INTERVALO_PADRAO)
+        self.lista_unidade.set_selected(idx)
+        self.spin.set_value(valor)
+        self.lista_modo.set_selected(0)
+
+    def ao_clicar_salvar(self, *_):
+        vals = self.valores_atuais()
+        self.botao_salvar.set_sensitive(False)
+        rc, err = gravar_config(montar_config(self.linhas_conf, vals))
+        if rc in (126, 127) and os.geteuid() != 0:  # autenticação cancelada no pkexec
+            self.ao_mudar()
+            return
+        if rc != 0:
+            self.erro("Não foi possível salvar a configuração", err or f"código de saída {rc}")
+            self.ao_mudar()
+            return
+
+        # wallpaper fixo: aplica já, sem esperar o próximo ciclo do timer
+        if vals["DISABLED"] == "no" and vals["FIXED_WALLPAPER"]:
+            self.executar_cli(vals["FIXED_WALLPAPER"])
+
+        self.carregar()
+        if vals["DISABLED"] == "yes":
+            msg = "Troca automática desativada."
+        elif vals["FIXED_WALLPAPER"]:
+            msg = f"Wallpaper fixo: {os.path.basename(vals['FIXED_WALLPAPER'])}."
+        else:
+            msg = (f"Slideshow a cada {intervalo_legivel(vals['INTERVAL'])} "
+                   "(vale a partir do próximo ciclo do timer).")
+        self.label_status.set_markup(
+            f"<span foreground='#34d399' weight='bold'>💾 Salvo!</span>   "
+            f"{GLib.markup_escape_text(msg)}")
+
+    def executar_cli(self, *args):
+        try:
+            subprocess.Popen([CLI, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            self.erro(f"Não foi possível executar {CLI}", str(e))
+
+    def ao_clicar_proximo(self, *_):
+        self.executar_cli()
+
+    def ao_clicar_sobre(self, *_):
+        sobre = Gtk.AboutDialog()
+        sobre.set_transient_for(self)
+        sobre.set_modal(True)
+        sobre.set_program_name(APP_NAME)
+        sobre.set_version(APP_VERSION)
+        sobre.set_logo_icon_name("preferences-desktop-wallpaper-symbolic")
+        sobre.set_comments(
+            "🖼️ Slideshow e wallpaper fixo para o GNOME, feito com Python + GTK4.\n"
+            "Desenvolvido para o VoidBR Linux 🐧"
+        )
+        sobre.set_website("https://voidbr.org")
+        sobre.set_website_label("VoidBR")
+        sobre.set_authors(["Vilmar Catafesta <vcatafesta@gmail.com>"])
+        sobre.set_copyright("© 2026 Vilmar Catafesta — Licença livre, use e modifique à vontade")
+        sobre.set_license_type(Gtk.License.MIT_X11)
+        sobre.present()
+
+
+class AppWallpaper(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID)
+
+    def do_activate(self):
+        janela = self.props.active_window or JanelaWallpaper(self)
+        janela.present()
+
+
+if __name__ == "__main__":
+    app = AppWallpaper()
+    app.run(None)

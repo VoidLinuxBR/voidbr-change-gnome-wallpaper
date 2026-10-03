@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=VoidBR Wallpaper Slideshow
+GenericName=Wallpaper do GNOME
+Comment=Configure o slideshow ou um wallpaper fixo no GNOME
+Comment[pt_BR]=Configure o slideshow ou um wallpaper fixo no GNOME
+Exec=voidbr-change-gnome-wallpaper-gui
+Icon=preferences-desktop-wallpaper
+Terminal=false
+Categories=Settings;DesktopSettings;GTK;X-VoidBR-Apps;
+OnlyShowIn=GNOME;
+Keywords=wallpaper;slideshow;papel de parede;fundo;background;
+StartupNotify=true

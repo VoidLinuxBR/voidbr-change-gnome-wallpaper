@@ -40,6 +40,7 @@ CONFIG=/etc/voidbr-change-gnome-wallpaper.conf
 BINARY=/usr/local/bin/voidbr-change-gnome-wallpaper
 INTERVAL=300 # 5 min
 DISABLED=no  # ligado
+FIXED_WALLPAPER=
 
 load_config() {
 	# Se o config foi apagado: encerra tudo
@@ -48,6 +49,8 @@ load_config() {
 		exit 0
 	fi
 
+	# zera antes de ler: se a linha sumir do .conf, não fica o valor antigo
+	FIXED_WALLPAPER=
 	. "$CONFIG"
 
 	# valida INTERVAL (somente números)
@@ -81,7 +84,14 @@ while :; do
 	[ "$INTERVAL" -gt 0 ] || INTERVAL=300
 
 	if [ "$DISABLED" != "yes" ]; then
-		"$BINARY"
+		if [ -n "$FIXED_WALLPAPER" ] && [ -f "$FIXED_WALLPAPER" ]; then
+			# wallpaper fixo
+			"$BINARY" "$FIXED_WALLPAPER"
+		else
+			[ -n "$FIXED_WALLPAPER" ] &&
+				echo "FIXED_WALLPAPER=$FIXED_WALLPAPER não encontrado. Usando slideshow." >&2
+			"$BINARY"
+		fi
 	fi
 
 	sleep "$INTERVAL"
