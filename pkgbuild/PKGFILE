@@ -13,10 +13,11 @@ md5sums=('SKIP')
 depends=(
 	bash
 	gnome-shell
-	'python3'         # >= 3.11 (tomllib)
+	'python3'         # GUI
 	'python3-gobject' # GUI
 	'gtk4'            # GUI (Gtk.AlertDialog: GTK >= 4.10)
-	'polkit'          # pkexec para as ações confirmadas
+	'polkit'          # pkexec para salvar o .conf em /etc
+	'util-linux'      # flock: uma instância do timer por usuário
 )
 
 # preserva o .conf editado pelo usuário/GUI nas atualizações do pacote
@@ -43,6 +44,11 @@ pre_install() {
 
 post_install() {
 	log "Finalizando instalação"
+	echo "==> voidbr-change-gnome-wallpaper instalado."
+	echo "    O slideshow inicia sozinho no próximo login do GNOME (autostart)."
+	echo "    Para iniciar agora, na sua sessão: voidbr-change-gnome-wallpaper-timer &"
+	echo "    ou abra 'VoidBR Wallpaper Slideshow' e clique em '▶️ Iniciar timer'."
+	echo "    Configuração: /etc/voidbr-change-gnome-wallpaper.conf"
 }
 
 pre_upgrade() {

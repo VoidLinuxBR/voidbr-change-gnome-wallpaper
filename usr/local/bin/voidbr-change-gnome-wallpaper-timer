@@ -6,9 +6,9 @@
 #  Aplica wallpapers do diretório em sequência
 #
 #  Created: 2025/09/13 - 12:34
-#  Altered: 2025/09/13 - 12:34
+#  Altered: 2026/10/04 - 18:40
 #
-#  Copyright (c) 2025-2025, Nome Completo <user@server.com>
+#  Copyright (c) 2025-2026, Vilmar Catafesta <vcatafesta@gmail.com>
 #  All rights reserved.
 #
 #  Redistribution and use in source and binary forms, with or without
@@ -41,6 +41,7 @@ BINARY=/usr/local/bin/voidbr-change-gnome-wallpaper
 INTERVAL=300 # 5 min
 DISABLED=no  # ligado
 FIXED_WALLPAPER=
+SLICE=5 # de quantos em quantos segundos confere se o .conf mudou
 
 load_config() {
 	# Se o config foi apagado: encerra tudo
@@ -49,7 +50,10 @@ load_config() {
 		exit 0
 	fi
 
-	# zera antes de ler: se a linha sumir do .conf, não fica o valor antigo
+	# zera antes de ler: se uma linha sumir do .conf, volta ao padrão
+	# em vez de ficar com o valor antigo
+	INTERVAL=300
+	DISABLED=no
 	FIXED_WALLPAPER=
 	. "$CONFIG"
 
@@ -71,10 +75,40 @@ load_config() {
 	esac
 }
 
+# data de modificação do .conf (vazio se não existir)
+config_mtime() {
+	stat -c %Y "$CONFIG" 2>/dev/null
+}
+
+# dorme INTERVAL segundos em fatias de SLICE; volta antes se o .conf mudar,
+# para a nova configuração valer na hora (e não só depois do intervalo antigo)
+wait_interval() {
+	local start_mtime waited=0 step
+	start_mtime=$(config_mtime)
+	while [ "$waited" -lt "$INTERVAL" ]; do
+		step=$((INTERVAL - waited))
+		[ "$step" -gt "$SLICE" ] && step=$SLICE
+		sleep "$step"
+		waited=$((waited + step))
+		[ "$(config_mtime)" != "$start_mtime" ] && return 0
+	done
+	return 0
+}
+
 # se o binário não existir, não faz sentido rodar
 if [ ! -x "$BINARY" ]; then
 	echo "$BINARY: comando não encontrado ou não executável. Encerrando." >&2
 	exit 0
+fi
+
+# uma instância por usuário: o autostart e o botão da GUI podem tentar iniciar duas
+lock="${XDG_RUNTIME_DIR:-/tmp}/voidbr-change-gnome-wallpaper-timer.$(id -u).lock"
+if command -v flock >/dev/null 2>&1; then
+	exec 9>"$lock"
+	if ! flock -n 9; then
+		echo "voidbr-change-gnome-wallpaper-timer já está rodando. Encerrando." >&2
+		exit 0
+	fi
 fi
 
 while :; do
@@ -94,5 +128,5 @@ while :; do
 		fi
 	fi
 
-	sleep "$INTERVAL"
+	wait_interval
 done

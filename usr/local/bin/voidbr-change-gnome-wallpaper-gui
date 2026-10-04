@@ -3,8 +3,8 @@
 #
 #   voidbr-change-gnome-wallpaper-gui
 #   Created: sex 02 out 2026 13:40:00 -04
-#   Altered: dom 04 out 2026 18:30:00 -04
-#   Updated: dom 04 out 2026 18:30:00 -04
+#   Altered: dom 04 out 2026 18:40:00 -04
+#   Updated: dom 04 out 2026 18:40:00 -04
 #
 #   Copyright (c) 2026, Vilmar Catafesta <vcatafesta@gmail.com>
 #   Copyright (c) 2026, ChiliLinux Development Team <https://chililinux.com> <https://github.com/chililinux>
@@ -12,6 +12,8 @@
 #   All rights reserved.
 #
 #   ChangeLog:
+#   - v0.3.0 (2026-10-04): Botão "▶️ Iniciar timer" quando o timer está parado
+#     (ex.: logo após instalar o pacote, sem precisar sair e entrar na sessão).
 #   - v0.2.0 (2026-10-04): Pasta dos wallpapers configurável (WALLPAPER_DIR no
 #     .conf), com botão "📁 Pasta…" para escolher; as miniaturas são recarregadas
 #     ao trocar de pasta e o "♻️ Padrão" volta para a pasta padrão.
@@ -104,11 +106,12 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 
 APP_ID = "br.voidbr.changegnomewallpaper"
 APP_NAME = "voidbr-change-gnome-wallpaper"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 CONFIG = "/etc/voidbr-change-gnome-wallpaper.conf"
 CLI = "/usr/local/bin/voidbr-change-gnome-wallpaper"
 TIMER = "voidbr-change-gnome-wallpaper-timer"
+TIMER_BIN = "/usr/local/bin/voidbr-change-gnome-wallpaper-timer"
 PASTA_PADRAO = "/usr/share/backgrounds/chililinux"
 ESQUEMA_FUNDO = "org.gnome.desktop.background"
 
@@ -572,6 +575,10 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
         caixa_status.add_css_class("caixa-status")
         self.label_status = Gtk.Label(label="⏳ Carregando…", xalign=0, hexpand=True, wrap=True)
         caixa_status.append(self.label_status)
+        self.botao_timer = self._botao("▶️ Iniciar timer", "botao-verde", self.ao_clicar_iniciar_timer)
+        self.botao_timer.set_valign(Gtk.Align.CENTER)
+        self.botao_timer.set_visible(False)
+        caixa_status.append(self.botao_timer)
         caixa.append(caixa_status)
 
         # --- Ações ---
@@ -783,10 +790,11 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
         if mudou:
             partes.append("<span foreground='#fbbf24' weight='bold'>✏️ alterações não salvas</span>")
         self.label_status.set_markup("   •   ".join(partes))
+        self.botao_timer.set_visible(not rodando and os.access(TIMER_BIN, os.X_OK))
         if not rodando:
             self.label_status.set_tooltip_text(
                 "O timer é iniciado no login do GNOME (autostart). "
-                "Saia e entre de novo na sessão para iniciá-lo.")
+                "Use \"▶️ Iniciar timer\" para iniciá-lo agora.")
         else:
             self.label_status.set_tooltip_text(None)
 
@@ -946,6 +954,28 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
         self.label_status.set_markup(
             f"<span foreground='#34d399' weight='bold'>💾 Salvo!</span>   "
             f"{GLib.markup_escape_text(msg)}")
+
+    def ao_clicar_iniciar_timer(self, *_):
+        """Inicia o timer na sessão do usuário, desvinculado da GUI.
+
+        start_new_session: o timer continua rodando depois que a GUI fecha
+        (e não recebe o Ctrl+C do terminal onde a GUI foi aberta). O próprio
+        timer garante uma instância só por usuário (flock).
+        """
+        try:
+            subprocess.Popen([TIMER_BIN], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError as e:
+            self.erro("Não foi possível iniciar o timer", str(e))
+            return
+        self.botao_timer.set_sensitive(False)
+
+        def conferir():
+            self.botao_timer.set_sensitive(True)
+            self.ao_mudar()
+            return False
+        GLib.timeout_add(1000, conferir)
 
     def executar_cli(self, *args):
         try:
