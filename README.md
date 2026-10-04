@@ -25,8 +25,10 @@ Feito para o [VoidBR Linux](https://voidbr.org).
 | `/usr/local/bin/voidbr-change-gnome-wallpaper-gui` | Interface gráfica (GTK4) para editar o `.conf` |
 | `/etc/voidbr-change-gnome-wallpaper.conf` | Configuração |
 
-Os wallpapers do slideshow vêm de `/usr/share/backgrounds/chililinux`. A posição atual
-fica em `~/.cache/voidbr-change-gnome-wallpaper/`, então cada usuário tem a sua sequência.
+Os wallpapers do slideshow vêm da pasta definida em `WALLPAPER_DIR` (padrão:
+`/usr/share/backgrounds/chililinux`). Só as imagens entram no slideshow (`.jpg`, `.jpeg`,
+`.png`, `.webp`, `.svg`, `.bmp`, `.jxl`, `.avif`); outros arquivos da pasta são ignorados.
+A posição atual fica em `~/.cache/voidbr-change-gnome-wallpaper/`, então cada usuário tem a sua sequência.
 
 Como o timer relê o `.conf` a cada ciclo, **não é preciso reiniciar nada** depois de
 alterar a configuração: a mudança vale a partir do próximo ciclo.
@@ -36,6 +38,10 @@ alterar a configuração: a mudança vale a partir do próximo ciclo.
 `/etc/voidbr-change-gnome-wallpaper.conf`:
 
 ```sh
+# Pasta com os wallpapers do slideshow
+# vazio = /usr/share/backgrounds/chililinux
+WALLPAPER_DIR=/usr/share/backgrounds/chililinux
+
 # Intervalo em segundos
 INTERVAL=60
 
@@ -50,6 +56,7 @@ FIXED_WALLPAPER=
 
 | Chave | Valores | Efeito |
 |---|---|---|
+| `WALLPAPER_DIR` | caminho de uma pasta, ou vazio | Pasta usada no slideshow. Vazio (ou ausente, em `.conf` antigos) usa `/usr/share/backgrounds/chililinux`. |
 | `INTERVAL` | número de segundos | Tempo entre as trocas. Valor inválido vira 300 (5 min). |
 | `DISABLED` | `yes`, `true`, `1` desativam; qualquer outro valor ativa | Com `yes`, o timer continua rodando mas não troca o wallpaper. |
 | `FIXED_WALLPAPER` | caminho de uma imagem, ou vazio | Se preenchido e o arquivo existir, mantém sempre essa imagem em vez do slideshow. Se o arquivo sumir, volta ao slideshow. |
@@ -57,10 +64,11 @@ FIXED_WALLPAPER=
 Caminhos com espaço precisam de aspas:
 
 ```sh
+WALLPAPER_DIR='/usr/share/backgrounds/Meus Wallpapers'
 FIXED_WALLPAPER='/usr/share/backgrounds/Meus Wallpapers/praia.png'
 ```
 
-> O `.conf` é global: use imagens fora do `$HOME` para que valham para todos os usuários.
+> O `.conf` é global: use pastas e imagens fora do `$HOME` para que valham para todos os usuários.
 
 ## Interface gráfica
 
@@ -74,7 +82,9 @@ Ou pelo menu do GNOME: **VoidBR Wallpaper Slideshow**.
 - **📌 Wallpaper fixo:** escolhe a imagem pelas miniaturas da pasta ou em **📂 Outro arquivo…**.
   Ao salvar, o wallpaper é aplicado na hora.
 - **⏸️ Desativado:** para as trocas sem perder as outras configurações.
+- **📁 Pasta…:** escolhe a pasta dos wallpapers (`WALLPAPER_DIR`); as miniaturas mudam na hora.
 - **⏭️ Próximo:** pula para o próximo wallpaper do slideshow.
+- **♻️ Padrão:** volta para slideshow a cada 1 minuto, na pasta padrão.
 
 A barra de status mostra se o timer está rodando e o que está salvo no `.conf`.
 Salvar pede a senha de administrador (pkexec), porque o arquivo fica em `/etc`.

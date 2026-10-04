@@ -3,8 +3,8 @@
 #
 #   voidbr-change-gnome-wallpaper-gui
 #   Created: sex 02 out 2026 13:40:00 -04
-#   Altered: dom 04 out 2026 18:20:00 -04
-#   Updated: dom 04 out 2026 18:20:00 -04
+#   Altered: dom 04 out 2026 18:30:00 -04
+#   Updated: dom 04 out 2026 18:30:00 -04
 #
 #   Copyright (c) 2026, Vilmar Catafesta <vcatafesta@gmail.com>
 #   Copyright (c) 2026, ChiliLinux Development Team <https://chililinux.com> <https://github.com/chililinux>
@@ -12,6 +12,9 @@
 #   All rights reserved.
 #
 #   ChangeLog:
+#   - v0.2.0 (2026-10-04): Pasta dos wallpapers configurável (WALLPAPER_DIR no
+#     .conf), com botão "📁 Pasta…" para escolher; as miniaturas são recarregadas
+#     ao trocar de pasta e o "♻️ Padrão" volta para a pasta padrão.
 #   - v0.1.1 (2026-10-04): Roda em qualquer máquina/VM: usa o renderizador cairo
 #     e desliga OpenGL/Vulkan no GDK (sem avisos de Vulkan/DRI3 e sem depender
 #     do driver de vídeo), a menos que GSK_RENDERER já esteja definido. Miniaturas
@@ -101,7 +104,7 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 
 APP_ID = "br.voidbr.changegnomewallpaper"
 APP_NAME = "voidbr-change-gnome-wallpaper"
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.2.0"
 
 CONFIG = "/etc/voidbr-change-gnome-wallpaper.conf"
 CLI = "/usr/local/bin/voidbr-change-gnome-wallpaper"
@@ -120,8 +123,10 @@ MINI_L, MINI_A = 132, 74
 MODOS = [("🎞️ Slideshow", "slide"), ("📌 Wallpaper fixo", "fixo"), ("⏸️ Desativado", "off")]
 UNIDADES = [("segundos", 1), ("minutos", 60), ("horas", 3600)]
 
-CHAVES = ("INTERVAL", "DISABLED", "FIXED_WALLPAPER")
+CHAVES = ("WALLPAPER_DIR", "INTERVAL", "DISABLED", "FIXED_WALLPAPER")
 COMENTARIO = {
+    "WALLPAPER_DIR": "# Pasta com os wallpapers do slideshow\n"
+                     f"# vazio = {PASTA_PADRAO}",
     "INTERVAL": "# Intervalo em segundos",
     "DISABLED": "# Controle do slideshow\n# yes | no | true | false | 0 | 1",
     "FIXED_WALLPAPER": "# Wallpaper fixo (caminho completo da imagem)\n"
@@ -297,14 +302,15 @@ def por_aspas(valor):
 
 def ler_config():
     """Lê o .conf sem executá-lo (o timer usa '.', aqui só interpretamos)."""
-    cfg = {"INTERVAL": INTERVALO_PADRAO, "DISABLED": "no", "FIXED_WALLPAPER": ""}
+    cfg = {"WALLPAPER_DIR": PASTA_PADRAO, "INTERVAL": INTERVALO_PADRAO,
+           "DISABLED": "no", "FIXED_WALLPAPER": ""}
     linhas = []
     existe = os.path.isfile(CONFIG)
     if existe:
         with open(CONFIG, encoding="utf-8", errors="replace") as f:
             linhas = f.read().splitlines()
         for linha in linhas:
-            m = re.match(r"^\s*(INTERVAL|DISABLED|FIXED_WALLPAPER)\s*=(.*)$", linha)
+            m = re.match(r"^\s*(WALLPAPER_DIR|INTERVAL|DISABLED|FIXED_WALLPAPER)\s*=(.*)$", linha)
             if not m:
                 continue
             chave, valor = m.group(1), tirar_aspas(m.group(2))
@@ -312,6 +318,9 @@ def ler_config():
                 cfg[chave] = int(valor) if valor.isdigit() and int(valor) > 0 else INTERVALO_FALLBACK
             elif chave == "DISABLED":
                 cfg[chave] = normalizar_disabled(valor)
+            elif chave == "WALLPAPER_DIR":
+                # mesma regra do script: vazio usa a pasta padrão
+                cfg[chave] = valor.rstrip("/") or PASTA_PADRAO
             else:
                 cfg[chave] = valor
     return existe, cfg, linhas
@@ -321,7 +330,7 @@ def montar_config(linhas, cfg):
     """Troca só os valores das chaves, preservando comentários e linhas extras."""
     vistas, saida = set(), []
     for linha in linhas:
-        m = re.match(r"^(\s*)(INTERVAL|DISABLED|FIXED_WALLPAPER)(\s*=).*$", linha)
+        m = re.match(r"^(\s*)(WALLPAPER_DIR|INTERVAL|DISABLED|FIXED_WALLPAPER)(\s*=).*$", linha)
         if m:
             chave = m.group(2)
             saida.append(f"{m.group(1)}{chave}{m.group(3)}{por_aspas(str(cfg[chave]))}")
@@ -362,19 +371,6 @@ def gravar_config(conteudo):
 # ---------------------------------------------------------------------------
 # sistema
 # ---------------------------------------------------------------------------
-
-def pasta_wallpapers():
-    """Lê o WALLPAPER_DIR direto do script (hoje é fixo lá dentro)."""
-    try:
-        with open(CLI, encoding="utf-8", errors="replace") as f:
-            for linha in f:
-                m = re.match(r'^\s*WALLPAPER_DIR=["\']?([^"\'\s]+)', linha)
-                if m:
-                    return m.group(1)
-    except OSError:
-        pass
-    return PASTA_PADRAO
-
 
 def listar_wallpapers(pasta):
     try:
@@ -440,7 +436,9 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
         self.linhas_conf = []
         self.salvo = None
         self.fundo = None
-        self.pasta = pasta_wallpapers()
+        self.pasta = PASTA_PADRAO
+        self.pasta_exibida = None  # pasta cujas miniaturas estão na grade
+        self.id_carga = 0          # idle que carrega as miniaturas
         self.wallpapers = []
         self.caminho_fixo = ""
         self.miniaturas = {}  # caminho -> FlowBoxChild
@@ -549,8 +547,11 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
         self.label_grade.add_css_class("subtitulo")
         self.label_pasta = Gtk.Label(xalign=1, selectable=True, ellipsize=Pango.EllipsizeMode.START)
         self.label_pasta.add_css_class("texto-apagado")
+        self.botao_pasta = self._botao("📁 Pasta…", "botao-azul", self.ao_clicar_pasta)
+        self.botao_pasta.set_tooltip_text("Escolher a pasta dos wallpapers")
         linha_titulo.append(self.label_grade)
         linha_titulo.append(self.label_pasta)
+        linha_titulo.append(self.botao_pasta)
         caixa.append(linha_titulo)
 
         rolagem = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
@@ -586,7 +587,6 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
         caixa.append(self._botao("🚪 Fechar", "botao-cinza", lambda *_: self.close()))
 
         self.configurar_gsettings()
-        self.preencher_miniaturas()
         self.carregar()
 
     # -- helpers de construção ---------------------------------------------
@@ -624,7 +624,17 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
             self.label_atual.set_text("🖥️ Wallpaper atual: (não foi possível ler do GNOME)")
 
     def preencher_miniaturas(self):
-        """Cria a grade de miniaturas e carrega as imagens aos poucos."""
+        """(Re)cria a grade de miniaturas da self.pasta e carrega as imagens aos poucos."""
+        if self.id_carga:
+            GLib.source_remove(self.id_carga)
+            self.id_carga = 0
+        while (filho := self.grade_mini.get_first_child()) is not None:
+            self.grade_mini.remove(filho)
+        self.miniaturas.clear()
+
+        self.pasta_exibida = self.pasta
+        self.label_pasta.set_text(self.pasta)
+        self.label_pasta.set_tooltip_text(self.pasta)
         self.wallpapers = listar_wallpapers(self.pasta)
         pendentes = []
         for caminho in self.wallpapers:
@@ -642,6 +652,7 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
 
         def proxima():
             if not pendentes:
+                self.id_carga = 0
                 return False
             img, caminho = pendentes.pop(0)
             tex = textura_miniatura(caminho)
@@ -649,12 +660,17 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
                 img.set_paintable(tex)
             return True
 
-        GLib.idle_add(proxima)
+        if pendentes:
+            self.id_carga = GLib.idle_add(proxima)
 
     def carregar(self):
         existe, cfg, linhas = ler_config()
         self.linhas_conf = linhas
         self.salvo = dict(cfg)
+
+        self.pasta = cfg["WALLPAPER_DIR"]
+        if self.pasta != self.pasta_exibida:
+            self.preencher_miniaturas()
 
         self.carregando = True
         idx, valor = melhor_unidade(cfg["INTERVAL"])
@@ -670,9 +686,6 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
         self.lista_modo.set_selected([c for _, c in MODOS].index(modo))
         self.carregando = False
 
-        self.label_pasta.set_text(self.pasta)
-        self.label_pasta.set_tooltip_text(self.pasta)
-
         avisos = []
         if not existe:
             avisos.append(f"⚠️ <b>{GLib.markup_escape_text(CONFIG)} não existe.</b>\n"
@@ -680,8 +693,9 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
         if cfg["FIXED_WALLPAPER"] and not os.path.isfile(cfg["FIXED_WALLPAPER"]):
             avisos.append("⚠️ <b>O wallpaper fixo configurado não existe mais.</b>\n"
                           "Enquanto isso, o timer está usando o slideshow.")
-        if not self.wallpapers:
-            avisos.append(f"⚠️ Nenhuma imagem em {GLib.markup_escape_text(self.pasta)}.")
+        aviso_pasta = self.aviso_pasta()
+        if aviso_pasta:
+            avisos.append(aviso_pasta)
         self.label_alerta.set_markup("\n".join(avisos))
         self.caixa_alerta.set_visible(bool(avisos))
 
@@ -713,6 +727,7 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
         else:
             fixo = self.caminho_fixo if modo == "fixo" else ""
         return {
+            "WALLPAPER_DIR": self.pasta,
             "INTERVAL": self.spin.get_value_as_int() * UNIDADES[self.lista_unidade.get_selected()][1],
             "DISABLED": "yes" if modo == "off" else "no",
             "FIXED_WALLPAPER": fixo,
@@ -731,6 +746,7 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
             self.grade_mini.set_selection_mode(Gtk.SelectionMode.NONE)
             self.label_grade.set_text(f"🗂️ {n} wallpaper{'s' if n != 1 else ''} na pasta:")
         self.rolagem_mini.set_sensitive(modo != "off")
+        self.botao_pasta.set_sensitive(modo != "off")
         self.sincronizar_selecao()
         self.ao_mudar()
 
@@ -744,6 +760,8 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
         self.botao_salvar.set_sensitive(valido and mudou)
         self.botao_proximo.set_sensitive(
             modo == "slide" and self.fundo is not None
+            # o script usa a pasta salva: com outra pasta na tela, o "Próximo" confundiria
+            and self.pasta == (self.salvo or {}).get("WALLPAPER_DIR")
             and os.access(CLI, os.X_OK) and bool(self.wallpapers))
         self.atualizar_status(mudou)
 
@@ -828,6 +846,61 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
             dialogo.show()
             self._dialogo = dialogo  # mantém a referência viva
 
+    def aviso_pasta(self):
+        """Texto de aviso sobre a pasta atual, ou None se estiver tudo certo."""
+        esc = GLib.markup_escape_text
+        if not os.path.isdir(self.pasta):
+            return f"⚠️ <b>A pasta {esc(self.pasta)} não existe.</b>"
+        if not self.wallpapers:
+            return f"⚠️ Nenhuma imagem em {esc(self.pasta)}."
+        if self.pasta.startswith(os.path.expanduser("~") + os.sep):
+            # o .conf é global, mas a pasta pode estar no $HOME de um usuário só
+            return ("⚠️ A pasta está na sua pasta pessoal: outros usuários do sistema "
+                    "não vão conseguir usá-la.")
+        return None
+
+    def trocar_pasta(self, caminho):
+        self.pasta = caminho.rstrip("/") or "/"
+        self.preencher_miniaturas()
+        aviso = self.aviso_pasta()
+        self.label_alerta.set_markup(aviso or "")
+        self.caixa_alerta.set_visible(bool(aviso))
+        self.ao_mudar_modo()
+
+    def ao_clicar_pasta(self, *_):
+        inicio = self.pasta if os.path.isdir(self.pasta) else PASTA_PADRAO
+        pasta_inicial = Gio.File.new_for_path(inicio) if os.path.isdir(inicio) else None
+
+        if hasattr(Gtk, "FileDialog"):
+            # API nova (GTK 4.10+), sem warnings de depreciação
+            dialogo = Gtk.FileDialog(title="Selecione a pasta dos wallpapers", modal=True)
+            if pasta_inicial:
+                dialogo.set_initial_folder(pasta_inicial)
+
+            def resposta(dlg, res):
+                try:
+                    pasta = dlg.select_folder_finish(res)
+                except GLib.Error:
+                    return
+                if pasta and pasta.get_path():
+                    self.trocar_pasta(pasta.get_path())
+            dialogo.select_folder(self, None, resposta)
+        else:
+            # Fallback para GTK4 mais antigo (< 4.10)
+            dialogo = Gtk.FileChooserNative(title="Selecione a pasta dos wallpapers",
+                                            transient_for=self,
+                                            action=Gtk.FileChooserAction.SELECT_FOLDER)
+            if pasta_inicial:
+                dialogo.set_current_folder(pasta_inicial)
+
+            def resposta(dlg, r):
+                if r == Gtk.ResponseType.ACCEPT and dlg.get_file():
+                    self.trocar_pasta(dlg.get_file().get_path())
+                dlg.destroy()
+            dialogo.connect("response", resposta)
+            dialogo.show()
+            self._dialogo = dialogo  # mantém a referência viva
+
     def ao_escolher_arquivo(self, caminho):
         self.definir_fixo(caminho)
         self.ao_mudar()
@@ -839,6 +912,8 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
             self.caixa_alerta.set_visible(True)
 
     def ao_clicar_padrao(self, *_):
+        if self.pasta != PASTA_PADRAO:
+            self.trocar_pasta(PASTA_PADRAO)
         idx, valor = melhor_unidade(INTERVALO_PADRAO)
         self.lista_unidade.set_selected(idx)
         self.spin.set_value(valor)

@@ -6,7 +6,7 @@
 #  Aplica wallpapers do diretório em sequência
 #
 #  Created: 2025/09/13 - 12:34
-#  Altered: 2025/09/13 - 12:34
+#  Altered: 2026/10/04 - 18:00
 #
 #  Copyright (c) 2025-2025, Nome Completo <user@server.com>
 #  All rights reserved.
@@ -74,7 +74,7 @@ shopt -s extglob
 
 #system
 declare APP="${0##*/}"
-declare _VERSION_="1.0.0-20250913"
+declare _VERSION_="1.2.0-20261004"
 declare distro="$(uname -n)"
 declare DEPENDENCIES=(tput)
 #source /usr/share/fetch/core.sh
@@ -84,8 +84,17 @@ MostraErro() {
 }
 trap 'MostraErro "$APP[$FUNCNAME][$LINENO]" "$BASH_COMMAND" "$?"; exit 1' ERR
 
-WALLPAPER_DIR="/usr/share/backgrounds/chililinux"
+CONFIG=/etc/voidbr-change-gnome-wallpaper.conf
+WALLPAPER_DIR_DEFAULT="/usr/share/backgrounds/chililinux"
 STATE_FILE="$HOME/.cache/${APP}/gnome-wallpaper-state"
+
+# Pasta dos wallpapers: vem do .conf (WALLPAPER_DIR); vazio ou ausente usa o padrão
+WALLPAPER_DIR=
+if [ -r "$CONFIG" ]; then
+	. "$CONFIG"
+fi
+WALLPAPER_DIR="${WALLPAPER_DIR:-$WALLPAPER_DIR_DEFAULT}"
+WALLPAPER_DIR="${WALLPAPER_DIR%/}"
 
 # Aplica um wallpaper (só grava no gsettings se for diferente do atual)
 apply_wallpaper() {
@@ -109,18 +118,38 @@ if [ -n "$1" ]; then
 	exit 0
 fi
 
+if [ ! -d "$WALLPAPER_DIR" ]; then
+	echo "${APP}: pasta de wallpapers não encontrada: $WALLPAPER_DIR" >&2
+	exit 1
+fi
+
 mkdir -p "$(dirname "$STATE_FILE")"
 
-# Lista todos os arquivos no diretório
-FILES=("$WALLPAPER_DIR"/*)
+# Lista só as imagens da pasta (a pasta pode ter outros arquivos)
+FILES=()
+for file in "$WALLPAPER_DIR"/*; do
+	[ -f "$file" ] || continue
+	case "${file,,}" in
+	*.jpg | *.jpeg | *.png | *.webp | *.svg | *.bmp | *.jxl | *.avif)
+		FILES+=("$file")
+		;;
+	esac
+done
 TOTAL=${#FILES[@]}
+
+if [ "$TOTAL" -eq 0 ]; then
+	echo "${APP}: nenhuma imagem em $WALLPAPER_DIR" >&2
+	exit 1
+fi
 
 # Se não existir state file, começa no 0
 if [ ! -f "$STATE_FILE" ]; then
 	INDEX=0
 else
 	INDEX=$(<"$STATE_FILE")
-	# Próximo índice
+	# estado corrompido: recomeça do início
+	case "$INDEX" in '' | *[!0-9]*) INDEX=-1 ;; esac
+	# Próximo índice (o módulo também cobre a troca para uma pasta com menos imagens)
 	INDEX=$(((INDEX + 1) % TOTAL))
 fi
 
