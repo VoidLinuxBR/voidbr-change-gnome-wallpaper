@@ -3,8 +3,8 @@
 #
 #   voidbr-change-gnome-wallpaper-gui
 #   Created: sex 02 out 2026 13:40:00 -04
-#   Altered: sex 02 out 2026 14:10:00 -04
-#   Updated: sex 02 out 2026 14:10:00 -04
+#   Altered: dom 04 out 2026 18:20:00 -04
+#   Updated: dom 04 out 2026 18:20:00 -04
 #
 #   Copyright (c) 2026, Vilmar Catafesta <vcatafesta@gmail.com>
 #   Copyright (c) 2026, ChiliLinux Development Team <https://chililinux.com> <https://github.com/chililinux>
@@ -12,6 +12,11 @@
 #   All rights reserved.
 #
 #   ChangeLog:
+#   - v0.1.1 (2026-10-04): Roda em qualquer máquina/VM: usa o renderizador cairo
+#     e desliga OpenGL/Vulkan no GDK (sem avisos de Vulkan/DRI3 e sem depender
+#     do driver de vídeo), a menos que GSK_RENDERER já esteja definido. Miniaturas
+#     com Gdk.MemoryTexture (Gdk.Texture.new_for_pixbuf é obsoleto no GTK 4.20).
+#     Fechar a janela encerra o app; Ctrl+C no terminal sai sem traceback.
 #   - v0.1.0 (2026-10-02): Versão inicial — GTK4 + PyGObject, no mesmo visual do
 #     voidbr-iso-writer e do voidbr-snapper-manager-gui (tema escuro, botões
 #     coloridos, emojis). Configura o /etc/voidbr-change-gnome-wallpaper.conf:
@@ -48,14 +53,46 @@ Requer: PyGObject (GTK4), polkit e o voidbr-change-gnome-wallpaper.
     sudo xbps-install -S python3-gobject gtk4 polkit
 """
 
+import ctypes
 import os
 import re
 import shlex
+import signal
 import subprocess
+import sys
 import tempfile
 from urllib.parse import unquote, urlparse
 
-import gi
+
+def configurar_renderizacao():
+    """Usa o renderizador cairo (CPU) e desliga OpenGL/Vulkan no GDK.
+
+    O app roda em máquinas e VMs de todo tipo: sem GPU, sem DRI3, sem driver
+    Vulkan. Com OpenGL/Vulkan ligados o GDK testa os drivers ao abrir a tela e
+    enche o terminal de avisos (Vulkan, MESA-EGL/DRI3). Para uma janela de
+    configuração, o cairo é mais que suficiente e funciona em todo lugar.
+
+    Precisa rodar ANTES do 'from gi.repository import Gtk', porque o import já
+    abre a tela. Se o usuário definiu GSK_RENDERER, respeita a escolha dele.
+    """
+    if os.environ.get("GSK_RENDERER"):
+        return
+    os.environ["GSK_RENDERER"] = "cairo"
+    # versão do GTK sem inicializá-lo: GDK_DISABLE existe a partir do 4.16;
+    # antes era GDK_DEBUG=gl-disable (que no GTK novo gera aviso de valor desconhecido)
+    try:
+        menor = ctypes.CDLL("libgtk-4.so.1").gtk_get_minor_version()
+    except (OSError, AttributeError):
+        menor = 16
+    if menor >= 16:
+        os.environ.setdefault("GDK_DISABLE", "gl,vulkan")
+    else:
+        os.environ.setdefault("GDK_DEBUG", "gl-disable,vulkan-disable")
+
+
+configurar_renderizacao()
+
+import gi  # noqa: E402
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
@@ -64,7 +101,7 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 
 APP_ID = "br.voidbr.changegnomewallpaper"
 APP_NAME = "voidbr-change-gnome-wallpaper"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 
 CONFIG = "/etc/voidbr-change-gnome-wallpaper.conf"
 CLI = "/usr/local/bin/voidbr-change-gnome-wallpaper"
@@ -370,11 +407,25 @@ def melhor_unidade(segundos):
 
 
 def textura_miniatura(caminho):
+    """Carrega a imagem já reduzida e devolve uma textura para o Gtk.Picture.
+
+    Gdk.Texture.new_for_pixbuf é obsoleto desde o GTK 4.20; o Gdk.MemoryTexture
+    existe desde o GTK 4.0, então serve para todas as versões.
+    """
     try:
         pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(caminho, MINI_L, MINI_A * 2, True)
-        return Gdk.Texture.new_for_pixbuf(pb)
     except GLib.Error:
         return None
+    formato = Gdk.MemoryFormat.R8G8B8A8 if pb.get_has_alpha() else Gdk.MemoryFormat.R8G8B8
+    stride = pb.get_rowstride()
+    dados = pb.read_pixel_bytes().get_data()
+    # o MemoryTexture exige stride * altura bytes; a última linha do pixbuf
+    # pode vir sem o preenchimento final
+    falta = stride * pb.get_height() - len(dados)
+    if falta > 0:
+        dados += bytes(falta)
+    return Gdk.MemoryTexture.new(pb.get_width(), pb.get_height(), formato,
+                                 GLib.Bytes.new(dados), stride)
 
 
 # ---------------------------------------------------------------------------
@@ -854,10 +905,21 @@ class AppWallpaper(Gtk.Application):
         super().__init__(application_id=APP_ID)
 
     def do_activate(self):
-        janela = self.props.active_window or JanelaWallpaper(self)
+        janela = self.props.active_window
+        if janela is None:
+            janela = JanelaWallpaper(self)
+            # fechar a janela principal encerra o app, mesmo que algo ainda
+            # esteja segurando o GApplication (antes ficava pendurado no terminal)
+            janela.connect("close-request", self.ao_fechar_janela)
         janela.present()
+
+    def ao_fechar_janela(self, *_):
+        self.quit()
+        return False  # deixa a janela fechar normalmente
 
 
 if __name__ == "__main__":
+    # Ctrl+C no terminal: encerra na hora, sem traceback
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     app = AppWallpaper()
-    app.run(None)
+    sys.exit(app.run(None))
