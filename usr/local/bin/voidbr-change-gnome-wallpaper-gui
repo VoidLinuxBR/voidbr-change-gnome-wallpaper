@@ -3,8 +3,8 @@
 #
 #   voidbr-change-gnome-wallpaper-gui
 #   Created: sex 02 out 2026 13:40:00 -04
-#   Altered: dom 04 out 2026 18:40:00 -04
-#   Updated: dom 04 out 2026 18:40:00 -04
+#   Altered: dom 04 out 2026 19:10:00 -04
+#   Updated: dom 04 out 2026 19:10:00 -04
 #
 #   Copyright (c) 2026, Vilmar Catafesta <vcatafesta@gmail.com>
 #   Copyright (c) 2026, ChiliLinux Development Team <https://chililinux.com> <https://github.com/chililinux>
@@ -12,6 +12,12 @@
 #   All rights reserved.
 #
 #   ChangeLog:
+#   - v0.4.0 (2026-10-04): Salvar não congela mais a janela: o pkexec roda em
+#     segundo plano, com --disable-internal-agent (a senha nunca é pedida no
+#     terminal) e uma ação polkit própria (org.voidbr.change-gnome-wallpaper.
+#     save-conf) que grava o .conf pelo voidbr-change-gnome-wallpaper-save-conf.
+#     Sem agente polkit gráfico, mostra um aviso explicando o que instalar.
+#     Miniaturas e prévia carregadas em threads, sem travar a janela.
 #   - v0.3.0 (2026-10-04): Botão "▶️ Iniciar timer" quando o timer está parado
 #     (ex.: logo após instalar o pacote, sem precisar sair e entrar na sessão).
 #   - v0.2.0 (2026-10-04): Pasta dos wallpapers configurável (WALLPAPER_DIR no
@@ -66,6 +72,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import unquote, urlparse
 
 
@@ -106,12 +114,14 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 
 APP_ID = "br.voidbr.changegnomewallpaper"
 APP_NAME = "voidbr-change-gnome-wallpaper"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 
 CONFIG = "/etc/voidbr-change-gnome-wallpaper.conf"
 CLI = "/usr/local/bin/voidbr-change-gnome-wallpaper"
 TIMER = "voidbr-change-gnome-wallpaper-timer"
 TIMER_BIN = "/usr/local/bin/voidbr-change-gnome-wallpaper-timer"
+SALVAR_BIN = "/usr/local/bin/voidbr-change-gnome-wallpaper-save-conf"
+PREVIA_L = 1280  # largura máxima da prévia do wallpaper atual
 PASTA_PADRAO = "/usr/share/backgrounds/chililinux"
 ESQUEMA_FUNDO = "org.gnome.desktop.background"
 
@@ -349,26 +359,53 @@ def montar_config(linhas, cfg):
     return "\n".join(saida) + "\n"
 
 
-def gravar_config(conteudo):
-    """Grava num temporário e instala em /etc via pkexec. Devolve (código, erro)."""
+def gravar_config_async(conteudo, callback):
+    """Grava o .conf sem travar a janela; chama callback(código, erro) no fim.
+
+    O conteúdo vai pela entrada padrão do voidbr-change-gnome-wallpaper-save-conf,
+    que roda como root via pkexec (ação polkit org.voidbr.change-gnome-wallpaper.
+    save-conf). --disable-internal-agent: sem agente polkit gráfico o pkexec falha
+    em vez de pedir a senha no terminal de onde a GUI foi aberta.
+    """
+    if os.geteuid() == 0:
+        comando = [SALVAR_BIN]
+    else:
+        comando = ["pkexec", "--disable-internal-agent", SALVAR_BIN]
+
+    # o conteúdo vai num arquivo ligado à entrada padrão (e não num pipe): o
+    # pkexec pode sair antes de ler (sem agente, cancelado) e escrever num pipe
+    # fechado daria "Broken pipe" no lugar da mensagem verdadeira
     fd, tmp = tempfile.mkstemp(prefix="voidbr-cgw-", suffix=".conf")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(conteudo)
-        os.chmod(tmp, 0o644)
-        comando = ["install", "-m", "644", "-o", "root", "-g", "root", tmp, CONFIG]
-        if os.geteuid() != 0:
-            comando = ["pkexec"] + comando
-        try:
-            p = subprocess.run(comando, capture_output=True, text=True)
-        except FileNotFoundError as e:
-            return 127, str(e)
-        return p.returncode, (p.stderr or p.stdout).strip()
-    finally:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(conteudo)
+
+    def limpar():
         try:
             os.unlink(tmp)
         except OSError:
             pass
+
+    lanc = Gio.SubprocessLauncher.new(Gio.SubprocessFlags.STDOUT_PIPE
+                                      | Gio.SubprocessFlags.STDERR_PIPE)
+    lanc.set_stdin_file_path(tmp)
+    lanc.setenv("LC_ALL", "C", True)  # mensagens do pkexec em inglês, fáceis de reconhecer
+    try:
+        proc = lanc.spawnv(comando)
+    except GLib.Error as e:
+        limpar()
+        GLib.idle_add(callback, 127, e.message)
+        return
+
+    def fim(p, res):
+        limpar()
+        try:
+            _ok, saida, erro = p.communicate_utf8_finish(res)
+        except GLib.Error as e:
+            callback(127, e.message)
+            return
+        callback(p.get_exit_status(), ((erro or "") + (saida or "")).strip())
+
+    proc.communicate_utf8_async(None, None, fim)
 
 
 # ---------------------------------------------------------------------------
@@ -405,15 +442,21 @@ def melhor_unidade(segundos):
     return 0, segundos
 
 
-def textura_miniatura(caminho):
-    """Carrega a imagem já reduzida e devolve uma textura para o Gtk.Picture.
+def carregar_pixbuf(caminho, largura, altura):
+    """Decodifica a imagem já reduzida. Pode rodar fora do thread da GUI."""
+    try:
+        return GdkPixbuf.Pixbuf.new_from_file_at_scale(caminho, largura, altura, True)
+    except GLib.Error:
+        return None
+
+
+def textura_de_pixbuf(pb):
+    """Converte o pixbuf numa textura para o Gtk.Picture.
 
     Gdk.Texture.new_for_pixbuf é obsoleto desde o GTK 4.20; o Gdk.MemoryTexture
     existe desde o GTK 4.0, então serve para todas as versões.
     """
-    try:
-        pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(caminho, MINI_L, MINI_A * 2, True)
-    except GLib.Error:
+    if pb is None:
         return None
     formato = Gdk.MemoryFormat.R8G8B8A8 if pb.get_has_alpha() else Gdk.MemoryFormat.R8G8B8
     stride = pb.get_rowstride()
@@ -441,7 +484,10 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
         self.fundo = None
         self.pasta = PASTA_PADRAO
         self.pasta_exibida = None  # pasta cujas miniaturas estão na grade
-        self.id_carga = 0          # idle que carrega as miniaturas
+        self.geracao = 0           # muda a cada troca de pasta: descarta cargas antigas
+        self.geracao_previa = 0
+        # decodificar centenas de imagens grandes no thread da GUI trava a janela
+        self.pool = ThreadPoolExecutor(max_workers=max(2, min(4, os.cpu_count() or 2)))
         self.wallpapers = []
         self.caminho_fixo = ""
         self.miniaturas = {}  # caminho -> FlowBoxChild
@@ -623,18 +669,36 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
 
     def atualizar_previa(self):
         caminho = self.wallpaper_atual()
-        if caminho and os.path.isfile(caminho):
-            self.imagem.set_filename(caminho)
-            self.label_atual.set_text(f"🖥️ Wallpaper atual: {os.path.basename(caminho)}")
-        else:
+        self.geracao_previa += 1
+        geracao = self.geracao_previa
+        if not (caminho and os.path.isfile(caminho)):
             self.imagem.set_paintable(None)
             self.label_atual.set_text("🖥️ Wallpaper atual: (não foi possível ler do GNOME)")
+            return
+        nome = os.path.basename(caminho)
+        self.label_atual.set_text(f"🖥️ Wallpaper atual: {nome}")
+
+        def pronto(pb):
+            if geracao != self.geracao_previa:
+                return False  # o wallpaper mudou de novo enquanto carregava
+            tex = textura_de_pixbuf(pb)
+            self.imagem.set_paintable(tex)
+            if tex is None:
+                self.label_atual.set_text(
+                    f"🖥️ Wallpaper atual: {nome} (formato sem suporte no GdkPixbuf)")
+            return False
+
+        def trabalho():
+            pb = carregar_pixbuf(caminho, PREVIA_L, PREVIA_L)
+            GLib.idle_add(pronto, pb)
+
+        self.pool.submit(trabalho)
 
     def preencher_miniaturas(self):
-        """(Re)cria a grade de miniaturas da self.pasta e carrega as imagens aos poucos."""
-        if self.id_carga:
-            GLib.source_remove(self.id_carga)
-            self.id_carga = 0
+        """(Re)cria a grade de miniaturas da self.pasta; as imagens são
+        decodificadas em threads e entram na grade conforme ficam prontas."""
+        self.geracao += 1
+        geracao = self.geracao
         while (filho := self.grade_mini.get_first_child()) is not None:
             self.grade_mini.remove(filho)
         self.miniaturas.clear()
@@ -657,18 +721,21 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
             self.miniaturas[caminho] = filho
             pendentes.append((img, caminho))
 
-        def proxima():
-            if not pendentes:
-                self.id_carga = 0
-                return False
-            img, caminho = pendentes.pop(0)
-            tex = textura_miniatura(caminho)
-            if tex:
-                img.set_paintable(tex)
-            return True
+        def pronto(img, pb):
+            if geracao == self.geracao:  # ainda é a mesma pasta
+                tex = textura_de_pixbuf(pb)
+                if tex:
+                    img.set_paintable(tex)
+            return False
 
-        if pendentes:
-            self.id_carga = GLib.idle_add(proxima)
+        def trabalho(img, caminho):
+            if geracao != self.geracao:
+                return  # trocou de pasta: nem decodifica
+            pb = carregar_pixbuf(caminho, MINI_L, MINI_A * 2)
+            GLib.idle_add(pronto, img, pb)
+
+        for img, caminho in pendentes:
+            self.pool.submit(trabalho, img, caminho)
 
     def carregar(self):
         existe, cfg, linhas = ler_config()
@@ -757,8 +824,8 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
         self.sincronizar_selecao()
         self.ao_mudar()
 
-    def ao_mudar(self, *_):
-        if self.carregando:
+    def ao_mudar(self, *_, manter_status=False):
+        if self.carregando or getattr(self, "salvando", False):
             return
         modo = self.modo()
         vals = self.valores_atuais()
@@ -770,7 +837,8 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
             # o script usa a pasta salva: com outra pasta na tela, o "Próximo" confundiria
             and self.pasta == (self.salvo or {}).get("WALLPAPER_DIR")
             and os.access(CLI, os.X_OK) and bool(self.wallpapers))
-        self.atualizar_status(mudou)
+        if not manter_status:
+            self.atualizar_status(mudou)
 
     def atualizar_status(self, mudou=False):
         esc = GLib.markup_escape_text
@@ -929,13 +997,36 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
 
     def ao_clicar_salvar(self, *_):
         vals = self.valores_atuais()
+        self.salvando = True
         self.botao_salvar.set_sensitive(False)
-        rc, err = gravar_config(montar_config(self.linhas_conf, vals))
-        if rc in (126, 127) and os.geteuid() != 0:  # autenticação cancelada no pkexec
-            self.ao_mudar()
-            return
+        self.botao_salvar.set_label("⏳ Salvando…")
+        self.label_status.set_markup(
+            "<span foreground='#fbbf24' weight='bold'>🔐 Aguardando autenticação…</span>")
+        gravar_config_async(montar_config(self.linhas_conf, vals),
+                            lambda rc, err: self.ao_terminar_salvar(vals, rc, err))
+
+    def ao_terminar_salvar(self, vals, rc, err):
+        self.salvando = False
+        self.botao_salvar.set_label("💾 Salvar")
         if rc != 0:
-            self.erro("Não foi possível salvar a configuração", err or f"código de saída {rc}")
+            if "no authentication agent" in err.lower():
+                self.erro("Nenhum agente polkit rodando",
+                          "Para salvar é preciso um agente de autenticação gráfico do "
+                          "polkit na sessão.\n\n"
+                          "• GNOME: o próprio gnome-shell faz isso; confira se o polkit e "
+                          "o elogind estão ativos (sv status polkitd elogind).\n"
+                          "• Hyprland e outros: instale e inicie um agente, por exemplo "
+                          "hyprpolkitagent ou polkit-gnome.")
+            elif rc == 126 or (rc == 127 and "not authorized" in err.lower()):
+                # janela de senha cancelada ou senha recusada: sem diálogo de erro
+                self.label_status.set_markup(
+                    "<span foreground='#f87171' weight='bold'>🔒 Autenticação cancelada.</span>"
+                    "   Nada foi salvo.")
+                self.ao_mudar(manter_status=True)
+                return
+            else:
+                self.erro("Não foi possível salvar a configuração",
+                          err or f"código de saída {rc}")
             self.ao_mudar()
             return
 
@@ -949,8 +1040,7 @@ class JanelaWallpaper(Gtk.ApplicationWindow):
         elif vals["FIXED_WALLPAPER"]:
             msg = f"Wallpaper fixo: {os.path.basename(vals['FIXED_WALLPAPER'])}."
         else:
-            msg = (f"Slideshow a cada {intervalo_legivel(vals['INTERVAL'])} "
-                   "(vale a partir do próximo ciclo do timer).")
+            msg = f"Slideshow a cada {intervalo_legivel(vals['INTERVAL'])}."
         self.label_status.set_markup(
             f"<span foreground='#34d399' weight='bold'>💾 Salvo!</span>   "
             f"{GLib.markup_escape_text(msg)}")
@@ -1018,7 +1108,12 @@ class AppWallpaper(Gtk.Application):
             janela.connect("close-request", self.ao_fechar_janela)
         janela.present()
 
-    def ao_fechar_janela(self, *_):
+    def ao_fechar_janela(self, janela, *_):
+        # descarta as miniaturas que ainda estão na fila: sem isso o Python
+        # esperaria todas serem decodificadas antes de sair
+        janela.geracao += 1
+        janela.geracao_previa += 1
+        janela.pool.shutdown(wait=False, cancel_futures=True)
         self.quit()
         return False  # deixa a janela fechar normalmente
 

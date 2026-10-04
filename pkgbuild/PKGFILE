@@ -13,11 +13,14 @@ md5sums=('SKIP')
 depends=(
 	bash
 	gnome-shell
-	'python3'         # GUI
-	'python3-gobject' # GUI
-	'gtk4'            # GUI (Gtk.AlertDialog: GTK >= 4.10)
-	'polkit'          # pkexec para salvar o .conf em /etc
-	'util-linux'      # flock: uma instância do timer por usuário
+	'python3'            # GUI
+	'python3-gobject'    # GUI
+	'gtk4'               # GUI (Gtk.AlertDialog: GTK >= 4.10)
+	'polkit'             # pkexec para salvar o .conf em /etc
+	'util-linux'         # flock: uma instância do timer por usuário
+	'libavif'            # carregador AVIF do GdkPixbuf (miniaturas/prévia)
+	'webp-pixbuf-loader' # carregador WebP do GdkPixbuf
+	'libjxl-plugins'     # carregador JPEG XL do GdkPixbuf
 )
 
 # preserva o .conf editado pelo usuário/GUI nas atualizações do pacote

@@ -20,6 +20,8 @@ Feito para o [VoidBR Linux](https://voidbr.org).
 | `/usr/local/bin/voidbr-change-gnome-wallpaper-timer` | Laço que lê o `.conf` e chama o script a cada intervalo (uma instância por usuário) |
 | `/usr/local/bin/voidbr-change-gnome-wallpaper` | Aplica o próximo wallpaper da pasta (ou uma imagem passada como argumento) |
 | `/usr/local/bin/voidbr-change-gnome-wallpaper-gui` | Interface gráfica (GTK4) para editar o `.conf` |
+| `/usr/local/bin/voidbr-change-gnome-wallpaper-save-conf` | Grava o `.conf` como root (chamado pela GUI via pkexec) |
+| `/usr/share/polkit-1/actions/org.voidbr.change-gnome-wallpaper.policy` | Ação polkit usada para salvar o `.conf` |
 | `/etc/voidbr-change-gnome-wallpaper.conf` | Configuração |
 
 Os wallpapers do slideshow vêm da pasta definida em `WALLPAPER_DIR` (padrão:
@@ -89,7 +91,16 @@ Ou pelo menu do GNOME: **VoidBR Wallpaper Slideshow**.
 - **▶️ Iniciar timer:** aparece quando o timer está parado e o inicia na sessão atual.
 
 A barra de status mostra se o timer está rodando e o que está salvo no `.conf`.
-Salvar pede a senha de administrador (pkexec), porque o arquivo fica em `/etc`.
+
+Salvar pede a senha de administrador, porque o arquivo fica em `/etc`. A senha é pedida
+na janela do **agente polkit** da sessão (a janela do app continua respondendo enquanto
+isso). No GNOME o agente é o próprio gnome-shell; no Hyprland e em outros ambientes é
+preciso um agente rodando, como o `hyprpolkitagent` ou o `polkit-gnome`. Sem agente, a
+GUI avisa e não salva (a senha nunca é pedida no terminal).
+
+Antes de gravar, o `voidbr-change-gnome-wallpaper-save-conf` confere o conteúdo: só
+aceita comentários, linhas vazias e as chaves `WALLPAPER_DIR`, `INTERVAL`, `DISABLED` e
+`FIXED_WALLPAPER` com valor simples ou entre aspas simples.
 
 ## Linha de comando
 
@@ -104,7 +115,8 @@ voidbr-change-gnome-wallpaper /usr/share/backgrounds/chililinux/wallpaper.jpg
 ## Dependências
 
 `bash`, `gnome-shell`, `util-linux` (`flock`) e, para a interface gráfica, `python3`,
-`python3-gobject`, `gtk4` e `polkit`.
+`python3-gobject`, `gtk4` e `polkit`. Para as miniaturas e a prévia de imagens AVIF,
+WebP e JPEG XL: `libavif`, `webp-pixbuf-loader` e `libjxl-plugins`.
 
 A interface usa o renderizador cairo (sem OpenGL/Vulkan), então roda em qualquer máquina
 ou VM. Para usar outro renderizador, defina `GSK_RENDERER` antes de abrir o app.
