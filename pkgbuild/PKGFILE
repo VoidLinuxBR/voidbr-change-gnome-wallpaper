@@ -19,6 +19,11 @@ depends=(
 	'polkit'          # pkexec para as ações confirmadas
 )
 
+# preserva o .conf editado pelo usuário/GUI nas atualizações do pacote
+backup=(
+	'/etc/voidbr-change-gnome-wallpaper.conf'
+)
+
 package() {
 	local dirs=("usr" "etc" "opt")
 	#   echo "DESTDIR=$DESTDIR"
